@@ -1,0 +1,14 @@
+# Pri `vercel deploy` z lokálneho disku sa nikdy nenahrá lokálna DB (osobné/testovacie údaje),
+# lokálne tajomstvá ani súbory AI asistentov. (Deploy z GitHubu berie len súbory v gite.)
+.data
+.env*
+!.env.example
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+.claude
+test-results
+playwright-report
+*.sql
+!drizzle/**/*.sql
+gamejam-*.csv
