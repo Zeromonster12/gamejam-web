@@ -1,0 +1,27 @@
+.git
+.gitignore
+node_modules
+.next
+.data
+.env
+.env.*
+!.env.example
+.vercel
+coverage
+test-results
+playwright-report
+tests
+*.tsbuildinfo
+npm-debug.log*
+Dockerfile
+docker-compose.yml
+.dockerignore
+docs
+README.md
+docker
+
+# AI asistenti
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+.claude

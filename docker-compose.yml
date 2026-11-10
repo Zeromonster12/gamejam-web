@@ -1,0 +1,78 @@
+# Lokálne alebo na vlastnom serveri:  docker compose up -d --build
+# Premenné sa berú z .env (vzor: .env.example) – compose ich dosadí nižšie (${…}).
+# Aplikácia počúva na 127.0.0.1:3000 – pred ňu daj reverse proxy s HTTPS (Caddy/nginx)
+# a nastav TRUST_PROXY=true (docs/DEPLOY.md).
+#
+# Databázové role:
+#   gamejam      – vlastník DB (POSTGRES_PASSWORD) → používa ho IBA jednorazová služba `migrate`
+#   gamejam_app  – aplikácia (APP_DB_PASSWORD), len SELECT/INSERT/UPDATE/DELETE
+#                  (zakladá ju docker/postgres-init/01-app-role.sh pri prvom štarte volume)
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gamejam
+      POSTGRES_USER: gamejam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Nastav POSTGRES_PASSWORD v .env}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Nastav APP_DB_PASSWORD v .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gamejam -d gamejam"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # databáza nie je publikovaná von z docker siete
+
+  # jednorazové migrácie pod vlastníkom schémy; aplikácia jeho heslo nikdy nedostane
+  migrate:
+    build: .
+    image: gamejam-web:latest
+    entrypoint: ["node", "/app/scripts/migrate.mjs"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      MIGRATION_DATABASE_URL: postgres://gamejam:${POSTGRES_PASSWORD}@db:5432/gamejam
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  app:
+    build: .
+    image: gamejam-web:latest
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      SKIP_MIGRATIONS: "true"
+      DATABASE_URL: postgres://gamejam_app:${APP_DB_PASSWORD}@db:5432/gamejam
+      SESSION_SECRET: ${SESSION_SECRET:?Nastav SESSION_SECRET v .env}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
+      IP_HASH_SECRET: ${IP_HASH_SECRET:?Nastav IP_HASH_SECRET v .env}
+      FORM_TOKEN_SECRET: ${FORM_TOKEN_SECRET:-}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-}
+      REGISTRATION_OPEN: ${REGISTRATION_OPEN:-true}
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.next/cache:uid=1001,gid=1001
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  pgdata:
