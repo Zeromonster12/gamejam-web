@@ -1,0 +1,4 @@
+# Konce riadkov LF v repozitári aj v pracovnej kópii (aj na Windows).
+# Shell skripty (scripts/docker-entrypoint.sh, docker/postgres-init/*.sh) s CRLF by v Linuxovom
+# Docker kontajneri zlyhali („/bin/sh^M: not found“). Binárne súbory git rozpozná sám.
+* text=auto eol=lf
