@@ -15,6 +15,13 @@
       "when": 1794334686990,
       "tag": "0001_security_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794529570852,
+      "tag": "0002_login_attempts_fail_index",
+      "breakpoints": true
     }
   ]
 }

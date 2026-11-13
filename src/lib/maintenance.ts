@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, desc, lt, ne } from "drizzle-orm";
+import { and, count, countDistinct, desc, eq, gte, inArray, lt, ne, notInArray } from "drizzle-orm";
 import { getDb, type Db } from "@/db";
 import { adminAudit, loginAttempts, registrationAttempts, registrations } from "@/db/schema";
 import { errorCode } from "./security";
@@ -28,6 +28,12 @@ export const AUDIT_ACTIONS = {
 
 export type AuditAction = keyof typeof AUDIT_ACTIONS;
 
+/**
+ * Neúspešné prihlásenia vyvolá aj anonym – evidujú sa oddelene od akcií organizátorov,
+ * aby ich záplava nevytlačila z prehľadu prihlásenia, exporty či wipe (a po 30 dňoch sa mažú).
+ */
+export const LOGIN_FAILURE_ACTIONS: AuditAction[] = ["login_fail", "login_fail_locked"];
+
 /** Zapíše audit záznam. Nikdy nehádže (audit nesmie zablokovať samotnú akciu). */
 export async function audit(action: AuditAction, ipHash: string, db?: Pick<Db, "insert">): Promise<void> {
   try {
@@ -37,24 +43,76 @@ export async function audit(action: AuditAction, ipHash: string, db?: Pick<Db, "
   }
 }
 
+/**
+ * Audit záznam najviac raz za `windowMs` pre tú istú akciu a zariadenie – pre udalosti, ktoré môže
+ * anonym opakovať ľubovoľne často (zamknuté pokusy, neúspechy v zdieľanom „unknown“ buckete).
+ * Úplný počet pokusov je v `login_attempts` (súhrn v admine). Nikdy nehádže.
+ */
+export async function auditOncePer(action: AuditAction, ipHash: string, windowMs: number): Promise<void> {
+  try {
+    const db = await getDb();
+    const [recent] = await db
+      .select({ id: adminAudit.id })
+      .from(adminAudit)
+      .where(and(eq(adminAudit.action, action), eq(adminAudit.ipHash, ipHash), gte(adminAudit.createdAt, new Date(Date.now() - windowMs))))
+      .limit(1);
+    if (!recent) await db.insert(adminAudit).values({ action, ipHash });
+  } catch (err) {
+    console.error(`[audit] write failed code=${errorCode(err)}`);
+  }
+}
+
 export type AuditEntry = { id: string; action: string; label: string; ip: string; createdAt: Date };
 
-/** Posledné záznamy auditu (volá ho len admin stránka po overení session). */
-export async function recentAudit(limit = 30): Promise<AuditEntry[]> {
-  const db = await getDb();
-  const rows = await db
-    .select({ id: adminAudit.id, action: adminAudit.action, ipHash: adminAudit.ipHash, createdAt: adminAudit.createdAt })
-    .from(adminAudit)
-    .orderBy(desc(adminAudit.createdAt))
-    .limit(limit);
-  return rows.map((r) => ({
+function toEntry(r: { id: string; action: string; ipHash: string; createdAt: Date }): AuditEntry {
+  return {
     id: r.id,
     action: r.action,
     label: AUDIT_ACTIONS[r.action as AuditAction] ?? r.action,
     // len krátky odtlačok HMAC – stačí na rozlíšenie „to isté zariadenie / iné“
     ip: r.ipHash === PURGED ? "—" : r.ipHash.slice(0, 8),
     createdAt: r.createdAt,
-  }));
+  };
+}
+
+const auditColumns = { id: adminAudit.id, action: adminAudit.action, ipHash: adminAudit.ipHash, createdAt: adminAudit.createdAt };
+
+export type AuditOverview = {
+  /** akcie organizátorov (prihlásenia, exporty, zmeny, wipe) – neúspechy ich nevytlačia */
+  actions: AuditEntry[];
+  /** posledné neúspešné / zablokované prihlásenia */
+  failures: AuditEntry[];
+  /** súhrn z login_attempts za 24 h (presný počet, aj keď sa audit deduplikuje) */
+  failedLast24h: { attempts: number; sources: number };
+};
+
+/** Audit pre admin prehľad (volá ho len admin stránka po overení session). */
+export async function auditOverview(actionsLimit = 30, failuresLimit = 20): Promise<AuditOverview> {
+  const db = await getDb();
+  const since = new Date(Date.now() - DAY);
+  const [actions, failures, [stats]] = await Promise.all([
+    db
+      .select(auditColumns)
+      .from(adminAudit)
+      .where(notInArray(adminAudit.action, LOGIN_FAILURE_ACTIONS))
+      .orderBy(desc(adminAudit.createdAt))
+      .limit(actionsLimit),
+    db
+      .select(auditColumns)
+      .from(adminAudit)
+      .where(inArray(adminAudit.action, LOGIN_FAILURE_ACTIONS))
+      .orderBy(desc(adminAudit.createdAt))
+      .limit(failuresLimit),
+    db
+      .select({ attempts: count(), sources: countDistinct(loginAttempts.ipHash) })
+      .from(loginAttempts)
+      .where(and(eq(loginAttempts.success, false), gte(loginAttempts.createdAt, since))),
+  ]);
+  return {
+    actions: actions.map(toEntry),
+    failures: failures.map(toEntry),
+    failedLast24h: { attempts: Number(stats?.attempts ?? 0), sources: Number(stats?.sources ?? 0) },
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -87,6 +145,11 @@ export async function housekeeping(force = false): Promise<void> {
       .update(registrations)
       .set({ ipHash: PURGED })
       .where(and(lt(registrations.createdAt, ipCutoff), ne(registrations.ipHash, PURGED)));
+    // neúspešné prihlásenia (môže ich vyvolať anonym) sa po 30 dňoch mažú → tabuľka nerastie donekonečna;
+    // akcie organizátorov ostávajú (bez osobných údajov, ipHash sa anonymizuje)
+    await db
+      .delete(adminAudit)
+      .where(and(inArray(adminAudit.action, LOGIN_FAILURE_ACTIONS), lt(adminAudit.createdAt, ipCutoff)));
     await db
       .update(adminAudit)
       .set({ ipHash: PURGED })

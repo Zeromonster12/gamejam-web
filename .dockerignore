@@ -25,3 +25,14 @@ AGENTS.md
 CLAUDE.md
 CLAUDE.local.md
 .claude
+
+# Zálohy DB, CSV exporty s osobnými údajmi a kľúče nikdy do build kontextu
+# (napr. `pg_dump … > zaloha.sql` z docs/DEPLOY.md v koreni projektu). Migrácie v drizzle/ ostávajú.
+**/*.sql
+!drizzle/*.sql
+**/*.dump
+**/gamejam-*.csv
+**/*.pem
+**/*.key
+blob-report
+skills-lock.json

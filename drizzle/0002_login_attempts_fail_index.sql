@@ -1,0 +1,1 @@
+CREATE INDEX "login_attempts_fail_created_idx" ON "login_attempts" USING btree ("created_at") WHERE "login_attempts"."success" = false;

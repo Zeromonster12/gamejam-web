@@ -1,6 +1,7 @@
 import { Suspense } from "react";
+import { redirect } from "next/navigation";
 import { connection } from "next/server";
-import { adminPasswordConfigured } from "@/lib/auth";
+import { adminPasswordConfigured, isAuthenticated } from "@/lib/auth";
 import { LoginForm } from "./login-form";
 
 export default function AdminLoginPage() {
@@ -20,6 +21,8 @@ export default function AdminLoginPage() {
 /** Dynamický render → Next.js doplní CSP nonce do skriptov (viď src/proxy.ts). */
 async function DynamicLogin() {
   await connection();
+  // autoritatívna kontrola (podpis + odvolanie v DB) – odvolaný token tu ostane na prihlásení, bez slučky
+  if (await isAuthenticated()) redirect("/admin");
   if (!adminPasswordConfigured()) {
     return (
       <p role="alert" className="text-sm text-pink" data-testid="login-disabled">

@@ -2,6 +2,7 @@
 
 import { and, count, eq, gte, inArray, sql } from "drizzle-orm";
 import { refresh } from "next/cache";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { getDb, type Db } from "@/db";
@@ -16,9 +17,11 @@ import {
   verifyAdminPassword,
   verifySession,
 } from "@/lib/auth";
-import { audit, housekeeping, type AuditAction } from "@/lib/maintenance";
+import { audit, auditOncePer, housekeeping, type AuditAction } from "@/lib/maintenance";
 import { EVENT } from "@/lib/event";
-import { errorCode, getClientIpHash, getUniqueViolation } from "@/lib/security";
+import { errorCode, getClientIpHash, getUniqueViolation, hashIp } from "@/lib/security";
+import { DEVICE_TTL_SECONDS, deviceCookieName, readDeviceToken, signDeviceToken } from "@/lib/device-token";
+import { sessionCookieSecure } from "@/lib/session-token";
 
 /** Výsledok admin akcií pre useActionState. */
 export type AdminActionState = { ok: boolean; message: string } | null;
@@ -28,6 +31,19 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 /** Globálny strop neúspechov (všetky IP) – nad ním sa prihlasovanie spomalí pre všetkých (nie zámok). */
 const GLOBAL_FAILURE_SOFT_CAP = 50;
 const MAX_DELAY_S = 30;
+/**
+ * Počty sa rátajú len po hodnotu, ktorú brzda potrebuje (oneskorenie je od n≈10 / g≈190 už maximálne) –
+ * cena kontroly tak nerastie s tým, koľko pokusov útočník nahromadí.
+ */
+const BUCKET_COUNT_CAP = 50;
+const GLOBAL_COUNT_CAP = 200;
+/**
+ * Strop riadkov za okno pre jeden bucket: zdieľaný „unknown“ bucket sa nikdy nezamyká, takže bez
+ * stropu by každá požiadavka pridala riadok. Nad stropom je oneskorenie už maximálne → nevkladáme.
+ */
+const BUCKET_ROW_CAP = BUCKET_COUNT_CAP;
+/** Zamknuté pokusy a neúspechy v nespoľahlivom buckete sa do auditu zapíšu najviac raz za okno. */
+const UNKNOWN_FAIL_AUDIT_WINDOW_MS = 60 * 1000;
 const MSG_LOGIN_FAILED = "Prihlásenie zlyhalo. Skontroluj heslo, prípadne to skús znova o 15 minút.";
 const MSG_LOGIN_BUSY = "Server je práve vyťažený. Skús sa prihlásiť o chvíľu.";
 const MSG_LOGIN_DISABLED = "Prihlásenie do adminu je vypnuté (nie je nastavené ADMIN_PASSWORD_HASH).";
@@ -38,8 +54,9 @@ const noControlChars = (v: string) => !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Brzda prihlasovania (v sekundách) alebo "locked".
- *  - spoľahlivá IP: tvrdý zámok po 5 neúspechoch / 15 min (per IP),
+ * Brzda prihlasovania (v sekundách) alebo "locked". Bucket = zapamätané zariadenie (device cookie),
+ * inak IP klienta.
+ *  - spoľahlivý bucket: tvrdý zámok po 5 neúspechoch / 15 min,
  *  - nespoľahlivá IP (bucket „unknown“ = všetci spolu): žiadny zámok (útočník by inak zamkol
  *    aj organizátorov), ale progresívne oneskorenie 2^(n-5) s, max 30 s,
  *  - globálne > 50 neúspechov / 15 min: oneskorenie pre všetkých.
@@ -70,35 +87,47 @@ export async function loginAction(_prev: AdminActionState, formData: FormData): 
 
   let success = false;
   try {
+    // ipHash = odtlačok IP do auditu; bucket = kľúč brute-force limitu
     const { ipHash, known } = await getClientIpHash();
+    const cookieStore = await cookies();
+    const deviceId = readDeviceToken(cookieStore.get(deviceCookieName())?.value);
+    // zariadenie, z ktorého sa už organizátor prihlásil → vlastný bucket (zámok cudzích pokusov z tej istej
+    // IP / NAT ho nezasiahne); inak IP (alebo zdieľaný „unknown“ bucket bez dôveryhodnej proxy)
+    const bucket = deviceId ? hashIp(`device:${deviceId}`) : ipHash;
+    const bucketKnown = deviceId ? true : known;
     const db = await getDb();
     after(() => housekeeping());
 
     // 1) pokus sa ZAPÍŠE (ako neúspech) ešte pred overením hesla – v transakcii so zámkom,
     //    takže ani paralelné požiadavky neprekročia limit
     const gate = await db.transaction(async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"login:" + ipHash}))`);
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"login:" + bucket}))`);
       const since = new Date(Date.now() - LOGIN_WINDOW_MS);
+      const failedSince = and(eq(loginAttempts.success, false), gte(loginAttempts.createdAt, since));
+      const bucketRows = tx
+        .select({ one: sql`1` })
+        .from(loginAttempts)
+        .where(and(eq(loginAttempts.ipHash, bucket), failedSince))
+        .limit(BUCKET_COUNT_CAP)
+        .as("bucket_rows");
+      // globálny počet používa čiastočný index login_attempts_fail_created_idx (drizzle/0002)
+      const globalRows = tx.select({ one: sql`1` }).from(loginAttempts).where(failedSince).limit(GLOBAL_COUNT_CAP).as("global_rows");
       const [[{ n }], [{ g }]] = await Promise.all([
-        tx
-          .select({ n: count() })
-          .from(loginAttempts)
-          .where(and(eq(loginAttempts.ipHash, ipHash), eq(loginAttempts.success, false), gte(loginAttempts.createdAt, since))),
-        tx
-          .select({ g: count() })
-          .from(loginAttempts)
-          .where(and(eq(loginAttempts.success, false), gte(loginAttempts.createdAt, since))),
+        tx.select({ n: count() }).from(bucketRows),
+        tx.select({ g: count() }).from(globalRows),
       ]);
-      const gate = loginGate(n, g, known);
+      const gate = loginGate(n, g, bucketKnown);
       if (gate.locked) return { ...gate, attemptId: null };
-      const [row] = await tx.insert(loginAttempts).values({ ipHash, success: false }).returning({ id: loginAttempts.id });
+      if (n >= BUCKET_ROW_CAP) return { ...gate, attemptId: null };
+      const [row] = await tx.insert(loginAttempts).values({ ipHash: bucket, success: false }).returning({ id: loginAttempts.id });
       return { ...gate, attemptId: row.id };
     });
 
-    if (gate.locked || !gate.attemptId) {
-      // dočasný zákaz: heslo sa ani neoveruje, hláška je rovnaká ako pri zlom hesle
+    if (gate.locked) {
+      // dočasný zákaz: heslo sa ani neoveruje, hláška je rovnaká ako pri zlom hesle;
+      // do auditu najviac 1 záznam za okno zámku (anonym môže skúšať ľubovoľne často)
       console.warn("[admin] login locked");
-      await audit("login_fail_locked", ipHash);
+      await auditOncePer("login_fail_locked", ipHash, LOGIN_WINDOW_MS);
       return { ok: false, message: MSG_LOGIN_FAILED };
     }
     if (gate.delayS > 0) await sleep(gate.delayS * 1000);
@@ -111,13 +140,24 @@ export async function loginAction(_prev: AdminActionState, formData: FormData): 
     }
     if (!ok) {
       console.warn("[admin] login failed");
-      await audit("login_fail", ipHash);
+      // spoľahlivý bucket má ≤ 5 neúspechov za 15 min → každý do auditu; zdieľaný bucket sa nezamyká → deduplikovať
+      if (bucketKnown) await audit("login_fail", ipHash);
+      else await auditOncePer("login_fail", ipHash, UNKNOWN_FAIL_AUDIT_WINDOW_MS);
       return { ok: false, message: MSG_LOGIN_FAILED };
     }
 
-    // 3) úspech → pokus prepnúť na úspešný
-    await db.update(loginAttempts).set({ success: true }).where(eq(loginAttempts.id, gate.attemptId));
+    // 3) úspech → pokus prepnúť na úspešný, zapamätať zariadenie
+    if (gate.attemptId) {
+      await db.update(loginAttempts).set({ success: true }).where(eq(loginAttempts.id, gate.attemptId));
+    }
     await createSession();
+    cookieStore.set(deviceCookieName(), signDeviceToken(), {
+      httpOnly: true,
+      secure: sessionCookieSecure(),
+      sameSite: "strict",
+      path: "/",
+      maxAge: DEVICE_TTL_SECONDS,
+    });
     await audit("login_ok", ipHash);
     success = true;
     console.info("[admin] login ok");
@@ -275,8 +315,17 @@ const createTeamFromParticipantsImpl = adminAction(createTeamSchema, "create_tea
   return db.transaction(async (tx) => {
     const existing = await tx.select({ id: teams.id }).from(teams).where(sql`lower(${teams.name}) = lower(${data.name})`).limit(1);
     if (existing.length) return { ok: false, message: "Tím s týmto názvom už existuje." };
-    const found = await tx.select({ id: participants.id }).from(participants).where(inArray(participants.id, ids));
+    // FOR UPDATE: súbežný presun tých istých hráčov počká na túto transakciu
+    const found = await tx
+      .select({ id: participants.id, teamId: participants.teamId })
+      .from(participants)
+      .where(inArray(participants.id, ids))
+      .for("update");
     if (found.length !== ids.length) return { ok: false, message: "Niektorý z vybraných hráčov už neexistuje. Obnov stránku." };
+    // nový tím sa skladá len z nepriradených – členov existujúcich tímov presúva „Presunúť do“ (s kontrolou veľkosti)
+    if (found.some((p) => p.teamId !== null)) {
+      return { ok: false, message: "Niektorý z vybraných hráčov už je v tíme. Vyber len nepriradených hráčov a obnov stránku." };
+    }
     const [team] = await tx.insert(teams).values({ name: data.name, origin: "admin" }).returning({ id: teams.id });
     await tx.update(participants).set({ teamId: team.id, isLeader: false }).where(inArray(participants.id, ids));
     return { ok: true, message: `Tím „${data.name}“ vytvorený (${ids.length} ${ids.length === 1 ? "hráč" : ids.length < 5 ? "hráči" : "hráčov"}).` };

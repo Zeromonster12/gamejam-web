@@ -82,7 +82,11 @@ export const loginAttempts = pgTable(
     success: boolean("success").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("login_attempts_ip_created_idx").on(t.ipHash, t.createdAt)],
+  (t) => [
+    index("login_attempts_ip_created_idx").on(t.ipHash, t.createdAt),
+    // globálny počet neúspechov za 15 min (brzda prihlasovania) → rozsah v indexe, nie scan celej tabuľky
+    index("login_attempts_fail_created_idx").on(t.createdAt).where(sql`${t.success} = false`),
+  ],
 );
 
 /** Každý pokus o registráciu (aj neúspešný) – rate limit proti enumerácii e-mailov. Maže sa po 24 h. */

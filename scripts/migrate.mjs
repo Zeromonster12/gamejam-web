@@ -11,6 +11,13 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const migrationsFolder = path.join(root, "drizzle");
 
+// `--vercel` (vercel-build): migruje sa len produkčný deploy. Preview/development buildy by inak
+// spúšťali migrácie z ľubovoľnej vetvy proti databáze, ktorú majú v premenných (často tej produkčnej).
+if (process.argv.includes("--vercel") && process.env.VERCEL_ENV !== "production") {
+  console.log(`[db:migrate] VERCEL_ENV=${process.env.VERCEL_ENV ?? "?"} – migrácie preskočené (spúšťajú sa len pri produkčnom deployi)`);
+  process.exit(0);
+}
+
 // .env pre lokálne spustenie (Node 20.12+/22 má process.loadEnvFile)
 for (const f of [".env.local", ".env"]) {
   const p = path.join(root, f);

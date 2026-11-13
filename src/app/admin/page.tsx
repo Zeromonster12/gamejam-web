@@ -11,6 +11,7 @@ import {
   wipeAllData,
 } from "@/app/actions/admin";
 import { getAdminOverview, type AdminParticipant, type AdminTeam } from "@/lib/admin-data";
+import type { AuditEntry } from "@/lib/maintenance";
 import { EVENT } from "@/lib/event";
 import { isRegistrationOpen } from "@/lib/registration-status";
 import { ADULT_AGE, FOCUS_LABELS, SCHOOL_TYPE_LABELS } from "@/lib/validation";
@@ -122,35 +123,26 @@ async function Dashboard() {
 
       <section aria-labelledby="audit-h" className="flex flex-col gap-3" data-testid="audit-log">
         <h2 id="audit-h" className={h2}>
-          Audit log <span className="text-grey">(posledných {data.audit.length})</span>
+          Audit log
         </h2>
         <p className="text-xs text-grey">
           Bez osobných údajov – „zariadenie“ je skrátený HMAC odtlačok IP adresy (po 30 dňoch sa anonymizuje).
+          Neúspešné prihlásenia sú zvlášť, aby ich záplava nevytlačila akcie organizátorov.
         </p>
-        {data.audit.length === 0 ? (
-          <p className="text-sm text-grey">Zatiaľ žiadne záznamy.</p>
-        ) : (
-          <div className="overflow-x-auto border-2 border-dim">
-            <table className="w-full min-w-[28rem] text-left text-xs">
-              <thead className="bg-navy font-pixel uppercase text-grey">
-                <tr>
-                  <th scope="col" className="px-3 py-2">Čas</th>
-                  <th scope="col" className="px-3 py-2">Akcia</th>
-                  <th scope="col" className="px-3 py-2">Zariadenie</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.audit.map((a) => (
-                  <tr key={a.id} className="border-t border-dim" data-action={a.action}>
-                    <td className="whitespace-nowrap px-3 py-1.5 text-grey">{fmtDateTime.format(a.createdAt)}</td>
-                    <td className="px-3 py-1.5">{a.label}</td>
-                    <td className="px-3 py-1.5 font-mono text-grey">{a.ip}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <h3 className="font-pixel text-xs uppercase text-grey">
+          Akcie organizátorov <span className="normal-case">(posledných {data.audit.actions.length})</span>
+        </h3>
+        <AuditTable entries={data.audit.actions} testId="audit-actions" />
+        <h3 className="mt-2 font-pixel text-xs uppercase text-grey">Neúspešné prihlásenia</h3>
+        <p className="text-xs" data-testid="audit-failed-24h">
+          Za posledných 24 h:{" "}
+          <strong className={data.audit.failedLast24h.attempts > 0 ? "text-pink" : "text-ink"}>
+            {data.audit.failedLast24h.attempts}
+          </strong>{" "}
+          neúspešných pokusov z {data.audit.failedLast24h.sources} zariadení/IP. Opakované a zablokované pokusy sa do
+          zoznamu nižšie zapisujú najviac raz za okno.
+        </p>
+        <AuditTable entries={data.audit.failures} testId="audit-failures" />
       </section>
 
       <section aria-labelledby="danger-h" className="border-4 border-[var(--red)] bg-shadow p-4 sm:p-6">
@@ -425,6 +417,38 @@ const fmtDateTime = new Intl.DateTimeFormat("sk-SK", {
   dateStyle: "short",
   timeStyle: "medium",
 });
+
+function AuditTable({ entries, testId }: { entries: AuditEntry[]; testId: string }) {
+  if (entries.length === 0) {
+    return (
+      <p className="text-sm text-grey" data-testid={testId}>
+        Zatiaľ žiadne záznamy.
+      </p>
+    );
+  }
+  return (
+    <div className="overflow-x-auto border-2 border-dim">
+      <table className="w-full min-w-[28rem] text-left text-xs" data-testid={testId}>
+        <thead className="bg-navy font-pixel uppercase text-grey">
+          <tr>
+            <th scope="col" className="px-3 py-2">Čas</th>
+            <th scope="col" className="px-3 py-2">Akcia</th>
+            <th scope="col" className="px-3 py-2">Zariadenie</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((a) => (
+            <tr key={a.id} className="border-t border-dim" data-action={a.action}>
+              <td className="whitespace-nowrap px-3 py-1.5 text-grey">{fmtDateTime.format(a.createdAt)}</td>
+              <td className="px-3 py-1.5">{a.label}</td>
+              <td className="px-3 py-1.5 font-mono text-grey">{a.ip}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 function Dt({ children }: { children: React.ReactNode }) {
   return <dt className="text-grey">{children}</dt>;

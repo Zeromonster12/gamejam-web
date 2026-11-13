@@ -28,9 +28,8 @@ export async function proxy(request: NextRequest) {
       if (!authed && !isLogin && pathname !== "/admin/export") {
         return withNoStore(NextResponse.redirect(new URL("/admin/login", request.url)));
       }
-      if (authed && isLogin) {
-        return withNoStore(NextResponse.redirect(new URL("/admin", request.url)));
-      }
+      // Z /admin/login proxy NEpresmerúva: nevidí odvolanie session (logout) v DB, takže by s DAL
+      // (verifySession → /admin/login) vytvoril slučku. Prihláseného presmeruje login stránka sama.
     }
 
     const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");

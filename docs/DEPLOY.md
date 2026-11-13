@@ -39,15 +39,26 @@ Admin je na `/admin` (prihlásenie `/admin/login`).
 
 Ochrana prihlásenia:
 - každý pokus sa zapíše **pred** overením hesla (v transakcii so zámkom) → ani paralelné pokusy neprekročia limit,
-- spoľahlivá IP (`TRUST_PROXY=true`): po 5 neúspechoch / 15 min je IP zablokovaná (aj so správnym heslom),
+- **zapamätané zariadenie**: po úspešnom prihlásení dostane prehliadač podpísanú cookie `__Host-gj_device`
+  (30 dní, nie je to prihlásenie – heslo treba stále). Limit sa preň počíta podľa zariadenia, nie podľa IP,
+  takže niekto na rovnakej sieti (napr. študenti na školskej Wi-Fi) zamkne zlými heslami len seba.
+  **Pred eventom sa preto z každého zariadenia organizátorov raz prihlás.** Zmena hesla cookie zneplatní.
+- spoľahlivá IP (`TRUST_PROXY=true`) bez zapamätaného zariadenia: po 5 neúspechoch / 15 min je IP zablokovaná
+  (aj so správnym heslom),
 - nespoľahlivá IP (`TRUST_PROXY=false`, všetci v jednom „buckete“): žiadny zámok (útočník by zamkol aj
-  organizátorov), ale progresívne oneskorenie 2^(n−5) s, max. 30 s,
+  organizátorov), ale progresívne oneskorenie 2^(n−5) s, max. 30 s; v tomto buckete sa za 15 min uloží
+  najviac 50 pokusov (vyššie je oneskorenie aj tak maximálne),
 - viac ako 50 neúspechov / 15 min globálne → spomalenie pre všetkých; najviac 3 súbežné scrypt výpočty
-  (pri preťažení „Server je práve vyťažený“).
+  (pri preťažení „Server je práve vyťažený“). Počty sa rátajú len do potrebnej hranice a globálny počet
+  používa čiastočný index (`drizzle/0002`), takže cena kontroly nerastie s počtom pokusov útočníka.
 - **Odhlásenie zneplatní všetky doteraz vydané admin tokeny** (aj u ostatných organizátorov – heslo je spoločné).
 
-Admin má **audit log** (posledných 30 akcií: prihlásenia, exporty, presuny, mazania, wipe) – bez osobných údajov,
-len skrátený HMAC odtlačok IP.
+Admin má **audit log** bez osobných údajov (len skrátený HMAC odtlačok IP) v dvoch častiach:
+- **akcie organizátorov** (posledných 30: prihlásenia, exporty, presuny, mazania, wipe) – neúspešné prihlásenia
+  ich nemôžu vytlačiť,
+- **neúspešné prihlásenia** (posledných 20) + presný počet neúspešných pokusov za 24 h. Zamknuté pokusy
+  sa zapisujú najviac raz za 15 min na zariadenie (v zdieľanom buckete bez proxy raz za minútu), aby anonym
+  nemohol audit zahltiť; po 30 dňoch sa tieto záznamy mažú.
 
 > Session cookie `__Host-gj_admin` je `Secure` → admin funguje len cez **HTTPS** (alebo `http://localhost`).
 
@@ -68,9 +79,10 @@ Zmena schémy: uprav `src/db/schema.ts` → `npm run db:generate` → commitni n
 2. Project Settings → Environment Variables: `SESSION_SECRET`, `ADMIN_PASSWORD_HASH`, `IP_HASH_SECRET`
    (+ voliteľne `REGISTRATION_OPEN`). `TRUST_PROXY` netreba.
 3. Migrácie – zvoľ jedno:
-   - **Build command** `npm run vercel-build` (= `node scripts/migrate.mjs && next build`), DB premenné
-     musia byť dostupné aj pri builde. Pozor: preview deploye by migrovali tú istú DB – pre preview
-     nastav inú (Neon branch) alebo build command len pre Production.
+   - **Build command** `npm run vercel-build` (= `node scripts/migrate.mjs --vercel && next build`; nastavené
+     aj vo `vercel.json`), DB premenné musia byť dostupné aj pri builde. Migrácie sa spustia **len pri
+     produkčnom deployi** (`VERCEL_ENV=production`) – preview buildy ich preskočia, takže vetva nemôže
+     zmeniť schému produkčnej DB.
    - **Ručne** pred deployom: `DATABASE_URL=… npm run db:migrate`.
 4. Deploy. `output: "standalone"` sa na Verceli automaticky vypína (detekcia `VERCEL`).
 
@@ -167,7 +179,7 @@ Bez proxy (`TRUST_PROXY=false`) zdieľajú všetci jeden limit a server pri šta
 - **Rate limit**: max. 20 pokusov (aj neplatných/duplicitných – brzda proti zisťovaniu, či je e-mail
   zaregistrovaný) a 5 úspešných registrácií za hodinu z jednej IP.
 - **Uchovávanie**: HMAC IP v registráciách a audite sa po 30 dňoch anonymizuje (`purged`), záznamy pokusov
-  sa mažú po 24 h. Ku každej registrácii sa ukladá verzia textu súhlasov (`CONSENT_VERSION` v `src/lib/event.ts` –
+  sa mažú po 24 h, záznamy o neúspešných prihláseniach v audite po 30 dňoch. Ku každej registrácii sa ukladá verzia textu súhlasov (`CONSENT_VERSION` v `src/lib/event.ts` –
   pri zmene textu súhlasu ju zvýš).
 - **Voliteľné rozšírenia (zámerne nepoužité)**: CAPTCHA (napr. self-hosted ALTCHA/Friendly Captcha, Cloudflare
   Turnstile) a double opt-in potvrdenie e-mailom. Vyžadujú externú službu alebo odosielanie e-mailov –
@@ -177,7 +189,9 @@ Bez proxy (`TRUST_PROXY=false`) zdieľajú všetci jeden limit a server pri šta
 
 V admine tlačidlá **Export CSV** (`/admin/export`, všetci hráči) a **Export strava/alergie**
 (`/admin/export?type=diet`). CSV je UTF-8 s BOM a oddeľovačom `;` → otvorí sa priamo v slovenskom Exceli.
-Hodnoty začínajúce `= + - @` sú prefixnuté `'` (ochrana proti formula injection).
+Hodnoty začínajúce `= + - @` sú prefixnuté `'` (ochrana proti formula injection); to isté platí za vloženým
+oddeľovačom (`,` `;` nový riadok) a TAB vo vnútri hodnoty sa nahradí medzerou – súbor je bezpečný aj vtedy,
+keď ho niekto otvorí s čiarkou alebo tabulátorom ako oddeľovačom.
 Export obsahuje osobné údaje – neposielaj ho e-mailom ďalej, po evente ho zmaž.
 
 ## Vymazanie dát (GDPR)

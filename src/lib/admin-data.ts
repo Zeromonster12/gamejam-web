@@ -5,7 +5,7 @@ import { getDb } from "@/db";
 import { participants, teams, type Participant, type Team } from "@/db/schema";
 import { after } from "next/server";
 import { isAuthenticated, verifySession } from "./auth";
-import { housekeeping, recentAudit, type AuditEntry } from "./maintenance";
+import { auditOverview, housekeeping, type AuditOverview } from "./maintenance";
 import { EVENT } from "./event";
 import { computeInsights, type Insights } from "./insights";
 import { ADULT_AGE } from "./validation";
@@ -41,7 +41,7 @@ export type AdminTeam = Pick<Team, "id" | "name" | "origin" | "notes" | "created
 };
 
 export type AdminOverview = {
-  audit: AuditEntry[];
+  audit: AuditOverview;
   /** Formulár sľubuje vymazanie údajov do 3 mesiacov po evente → koniec eventu + 90 dní. */
   retention: { deadline: Date; over: boolean };
   teams: AdminTeam[];
@@ -88,7 +88,7 @@ export async function getAdminOverview(): Promise<AdminOverview> {
       .select(participantColumns)
       .from(participants)
       .orderBy(desc(participants.isLeader), asc(participants.createdAt), asc(participants.lastName)),
-    recentAudit(30),
+    auditOverview(30, 20),
   ]);
 
   const byTeam = new Map<string, AdminParticipant[]>();

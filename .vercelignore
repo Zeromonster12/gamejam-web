@@ -12,3 +12,8 @@ playwright-report
 *.sql
 !drizzle/**/*.sql
 gamejam-*.csv
+*.dump
+*.pem
+*.key
+blob-report
+skills-lock.json
