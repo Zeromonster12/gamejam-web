@@ -388,6 +388,46 @@ body::after {
   color: var(--pink);
 }
 
+/*
+ * Nízke obrazovky (notebooky, napr. MacBook Air ~830 px výšky okna): úvod sa prispôsobí aj výške,
+ * nielen šírke. Medzery sa zhustia a nadpis sa zmenší tak, aby sa celý „title screen“ vrátane dátumu
+ * zmestil a pod ním vykukol riadok Kedy? / Štart / Kde? (signál, že sa dá scrollovať).
+ * 436 px = HUD + zvyšok úvodu (zhustený) + kúsok ďalšej sekcie. Na vysokých monitoroch bez zmeny.
+ */
+@media (min-width: 720px) and (max-height: 900px) {
+  :root {
+    /* najmenšia šírka nadpisu – na veľmi nízkych oknách má nadpis prednosť pred „vykukujúcou“ sekciou */
+    --hero-title-min: 240px;
+    /* svh = výška okna aj s vysunutou lištou prehliadača (Safari 15.4+, Chrome 108+, Firefox 101+) */
+    --hero-title-w: min(732px, max(var(--hero-title-min), calc((100svh - 436px) * 227.8 / 147)));
+  }
+  .hero {
+    padding: 12px 0 4px;
+  }
+  .hero-presenter {
+    margin-bottom: 4px;
+  }
+  .hero-frame {
+    max-width: calc(var(--hero-title-w) + 112px);
+    padding: 22px 56px;
+  }
+  .hero-title-svg {
+    width: min(100%, var(--hero-title-w));
+  }
+  .tagline {
+    margin-top: 14px;
+  }
+  .press-start {
+    margin-top: 16px;
+  }
+}
+@media (min-width: 1000px) and (max-height: 900px) {
+  :root {
+    /* notebooky 1366×768 a pod.: nadpis nesmie byť užší než slogan pod ním */
+    --hero-title-min: 420px;
+  }
+}
+
 /* ---------- INFO ---------- */
 .info {
   margin-top: 34px;
